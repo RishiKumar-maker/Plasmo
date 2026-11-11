@@ -1,0 +1,360 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="theme-color" content="#05070d">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>The Hollow House</title>
+<style>
+:root{color-scheme:dark;--bg:#05070d;--fg:#e8dcc8;--ac:#ff9a3c}
+*{box-sizing:border-box}html,body{margin:0;height:100%;background:var(--bg);color:var(--fg);font:15px/1.4 Georgia,serif;overflow:hidden}
+canvas{display:block;width:100%;height:100%}[hidden]{display:none!important}
+#hud div{position:fixed;pointer-events:none;text-shadow:0 0 4px #000}
+#obj{top:calc(10px + env(safe-area-inset-top,0px));left:12px;font-size:13px}#obj b{color:var(--ac)}
+#bar{top:calc(10px + env(safe-area-inset-top,0px));right:12px;width:140px;height:10px;border:1px solid #fff6;background:#0008}
+#san{display:block;height:100%;background:#6fa8ff}
+#msg{bottom:24%;left:0;right:0;text-align:center;padding:0 10%;font-size:17px}
+#pr{bottom:31%;left:0;right:0;text-align:center;color:var(--ac)}
+#tool{bottom:calc(14px + env(safe-area-inset-bottom,0px));left:14px;font:16px monospace;color:#8f8}
+#vig{inset:0;background:radial-gradient(circle,transparent 35%,#000 100%);opacity:.3}
+#flash{inset:0;background:#a00;opacity:0}
+#dot{top:50%;left:50%;width:4px;height:4px;margin:-2px;background:#fff8;border-radius:50%}
+#menu,#jr{position:fixed;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:8px;background:#000d;text-align:center;padding:20px;overflow:auto}
+h1{margin:0;font-size:36px;letter-spacing:3px;color:var(--ac)}h2{margin:0;color:var(--ac)}p{margin:4px}
+button{font:inherit;padding:8px 18px;background:#1b1320;color:var(--fg);border:1px solid var(--ac);cursor:pointer;min-width:230px}
+button.on{background:#5a3412}#ql{display:flex;gap:6px;flex-wrap:wrap;justify-content:center}#ql button{min-width:0;padding:6px 14px}#hud #grain{display:none;inset:-50%;opacity:.07;animation:gr .5s steps(5) infinite}@keyframes gr{0%{transform:translate(0,0)}25%{transform:translate(-3%,2%)}50%{transform:translate(2%,-3%)}75%{transform:translate(3%,2%)}}#jr{justify-content:flex-start;padding-top:24px}small{opacity:.7}
+</style></head><body>
+<canvas id="c"></canvas>
+<div id="hud"><div id="vig"></div><div id="flash"></div><div id="dot"></div><div id="grain"></div><div id="obj"></div><div id="bar"><i id="san"></i></div><div id="msg"></div><div id="pr"></div><div id="tool"></div></div>
+<div id="jr" hidden></div>
+<div id="menu"><h1>THE HOLLOW HOUSE</h1>
+<p>You are a ghost hunter. Take your gear from the truck, enter the house,<br>gather evidence, work out what haunts it, then report back to the truck.</p>
+<small>Graphics quality (reloads the page):</small><div id="ql"></div><button id="go">Click to start</button>
+<small>WASD move · Shift sprint · Mouse look · E interact / use tool<br>1–5 equipment · F flashlight · J journal<br>Low sanity invites hunts. During a hunt, hide in a closet.</small></div>
+
+<script type="importmap">{"imports":{"three":"./lib/three.module.min.js","three/addons/":"./lib/addons/"}}</script>
+<script type="module">
+import * as THREE from 'three';
+import {mergeGeometries} from 'three/addons/utils/BufferGeometryUtils.js';
+import {GLTFLoader} from 'three/addons/loaders/GLTFLoader.js';
+const $=id=>document.getElementById(id),R=(a,b)=>a+Math.random()*(b-a),cl=(v,a,b)=>Math.max(a,Math.min(b,v)),pick=a=>a[Math.random()*a.length|0];
+const Q=(()=>{try{const p=new URLSearchParams(location.search).get('q');if(p!==null){localStorage.setItem('hhq',p);return Math.min(2,+p||0)}const v=localStorage.getItem('hhq');return v===null?1:Math.min(2,+v)}catch(e){return 1}})(); // 0 low (Chromebook) · 1 medium · 2 high (PBR + flashlight shadows)
+
+/* renderer: Chromebook budget (no shadows/AA, instancing, adaptive resolution) */
+const renderer=new THREE.WebGLRenderer({canvas:$('c'),antialias:Q>=2,powerPreference:Q>=2?'high-performance':'low-power'});
+let pr=Math.min(devicePixelRatio,Q>=2?1.5:1);renderer.setPixelRatio(pr);if(Q>=1){renderer.toneMapping=THREE.ACESFilmicToneMapping;renderer.toneMappingExposure=1.15}if(Q>=2){renderer.shadowMap.enabled=true;renderer.shadowMap.type=THREE.PCFSoftShadowMap}
+const scene=new THREE.Scene(),SKY=0x070b16;scene.background=new THREE.Color(SKY);scene.fog=new THREE.FogExp2(SKY,.04);
+const cam=new THREE.PerspectiveCamera(70,1,.1,120);cam.rotation.order='YXZ';scene.add(cam);
+const amb=new THREE.AmbientLight(0x5a6a99,.8);scene.add(amb);
+const torch=new THREE.SpotLight(0xffd9a0,0,20,.55,.5,1);torch.position.set(.2,-.1,0);torch.target.position.set(0,0,-5);cam.add(torch,torch.target);if(Q>=2){torch.castShadow=true;torch.shadow.mapSize.set(1024,1024);torch.shadow.camera.near=.3;torch.shadow.camera.far=18;torch.shadow.bias=-.0004;torch.shadow.normalBias=.03}
+const vm=new THREE.Mesh(new THREE.BoxGeometry(.12,.16,.3),new THREE.MeshLambertMaterial({color:0x888888}));vm.position.set(.28,-.25,-.55);vm.visible=false;cam.add(vm);
+function resize(){renderer.setSize(innerWidth,innerHeight,false);cam.aspect=innerWidth/innerHeight;cam.updateProjectionMatrix()}addEventListener('resize',resize);resize();
+
+/* helpers */
+const mk=(o,r=.85)=>Q>=2?new THREE.MeshStandardMaterial(Object.assign({roughness:r,metalness:0},o)):new THREE.MeshLambertMaterial(o),RG={wood:.5,tile:.3,carpet:1,conc:.9,wall:.85,bwall:.9,side:.7,grass:1};
+const mats={},geos={},M=c=>mats[c]||(mats[c]=mk({color:c})),G=(w,h,d)=>geos[w+','+h+','+d]||(geos[w+','+h+','+d]=new THREE.BoxGeometry(w,h,d));
+const colliders=[],inters=[],doors=[];
+let curLv=0;
+function uvs(g,w,h,d){const u=g.attributes.uv;for(let f=0;f<6;f++){const a=f<2?d:w,b=f>1&&f<4?d:h;for(let i=0;i<4;i++){const k=f*4+i;u.setXY(k,u.getX(k)*a*.5,u.getY(k)*b/3)}}}
+function box(x,z,w,d,h,c,solid=true,y=0,mat,uv){let g=G(w,h,d);if(uv){g=new THREE.BoxGeometry(w,h,d);uvs(g,w,h,d)}
+  const m=new THREE.Mesh(g,mat||M(c));m.position.set(x,y+(curLv?-2.8:0)+h/2,z);scene.add(m);const col=solid?{x0:x-w/2,x1:x+w/2,z0:z-d/2,z1:z+d/2,lv:curLv}:null;if(col)colliders.push(col);return{m,col}}
+let SC=1;const B=(x,z,w,d,h,c,y=0,s=true)=>{const r=box(x*SC,z*SC,w*SC,d*SC,h,c,s,y);if(s&&!y&&h>.3)shadow(x*SC,z*SC,w*SC,d*SC);return r};
+const add=(x,z,label,act,o={})=>{const it=Object.assign({x,z,label,act,lv:curLv},o);inters.push(it);return it};
+const GC={},glow=c=>GC[c]||(GC[c]=new THREE.MeshBasicMaterial({color:c}));
+
+/* ---------- MAP: Willow Street, scaled from the floor plan (1 px ≈ 6 cm) ---------- */
+const S=1.35,OX=12,OZ=19,WT=.3,FDX=.6*S,FDZ=8.8*S,SX0=-5*S,SX1=-.4*S,SZ0=-2.8*S,SZ1=-.8*S; // S = house scale vs. the traced plan
+const P={wood:['#6b4a2f',g=>{g.fillStyle='#3b2616';for(let y=0;y<64;y+=16){g.fillRect(0,y,64,1);g.fillRect((y*3)%64,y,1,16)}}],
+ tile:['#c9ced2',g=>{g.fillStyle='#8a9096';g.fillRect(31,0,1,64);g.fillRect(0,31,64,1);g.fillStyle='#b4babf';g.fillRect(0,0,31,31);g.fillRect(32,32,32,32)}],
+ carpet:['#8c7b6a',0],conc:['#6b6e72',g=>{g.fillStyle='#4a4d52';g.fillRect(0,31,64,1);g.fillRect(31,0,1,64)}],
+ wall:['#cbbfa6',g=>{g.fillStyle='rgba(120,100,70,.18)';for(let x=0;x<64;x+=8)g.fillRect(x,0,3,64);g.fillStyle='#6a5a48';g.fillRect(0,52,64,12);g.fillStyle='#2e241c';g.fillRect(0,50,64,2);g.fillRect(0,0,64,2)}],
+ bwall:['#585b60',g=>{g.fillStyle='#34363a';for(let y=0;y<64;y+=16){g.fillRect(0,y,64,1);for(let x=(y/16%2)*16;x<64;x+=32)g.fillRect(x,y,1,16)}}],
+ side:['#7d8fa0',g=>{g.fillStyle='#55657a';for(let y=0;y<56;y+=8)g.fillRect(0,y,64,1);g.fillStyle='#e8e8ec';g.fillRect(0,56,64,8)}],grass:['#27492f',0]};
+const TM={};
+function tm(k,rx=1,ry=1,c=0xffffff){const id=k+rx+','+ry+c;if(TM[id])return TM[id];const[b,f]=P[k],cv=document.createElement('canvas');cv.width=cv.height=64;const g=cv.getContext('2d');g.fillStyle=b;g.fillRect(0,0,64,64);
+  for(let i=0;i<260;i++){g.fillStyle='rgba(0,0,0,'+R(0,.12)+')';g.fillRect(R(0,64)|0,R(0,64)|0,2,2)}f&&f(g);
+  const t=new THREE.CanvasTexture(cv);t.wrapS=t.wrapT=THREE.RepeatWrapping;t.magFilter=THREE.NearestFilter;t.colorSpace=THREE.SRGBColorSpace;t.repeat.set(rx,ry);const o={map:t,color:c};
+  if(Q>=2){const nt=new THREE.CanvasTexture(nmap(cv));nt.wrapS=nt.wrapT=THREE.RepeatWrapping;nt.repeat.set(rx,ry);o.normalMap=nt;o.normalScale=new THREE.Vector2(1.3,1.3)}return TM[id]=mk(o,RG[k])}
+function nmap(cv){const n=cv.width,d=cv.getContext('2d').getImageData(0,0,n,n).data,oc=document.createElement('canvas');oc.width=oc.height=n;const g=oc.getContext('2d'),im=g.createImageData(n,n),h=(x,y)=>{const k=(((y+n)%n)*n+((x+n)%n))*4;return(d[k]+d[k+1]+d[k+2])/765};
+  for(let y=0;y<n;y++)for(let x=0;x<n;x++){const dx=(h(x+1,y)-h(x-1,y))*2,dy=(h(x,y+1)-h(x,y-1))*2,l=Math.hypot(dx,dy,1),k=(y*n+x)*4;im.data[k]=(-dx/l*.5+.5)*255;im.data[k+1]=(dy/l*.5+.5)*255;im.data[k+2]=(1/l*.5+.5)*255;im.data[k+3]=255}g.putImageData(im,0,0);return oc}
+const wlM=tm('wall'),bwM=tm('bwall'),sdM=tm('side');
+function rad(st){const c=document.createElement('canvas');c.width=c.height=64;const g=c.getContext('2d'),r=g.createRadialGradient(32,32,0,32,32,32);st.forEach(a=>r.addColorStop(a[0],a[1]));g.fillStyle=r;g.fillRect(0,0,64,64);return new THREE.CanvasTexture(c)}
+const dm=(st,o={})=>new THREE.MeshBasicMaterial(Object.assign({map:rad(st),transparent:true,depthWrite:false},o));
+const shM=dm([[0,'rgba(0,0,0,.5)'],[1,'rgba(0,0,0,0)']]),aoM=dm([[0,'rgba(0,0,0,0)'],[.65,'rgba(0,0,0,0)'],[1,'rgba(0,0,0,.5)']]),moonM=dm([[0,'rgba(130,160,235,.6)'],[1,'rgba(130,160,235,0)']],{blending:THREE.AdditiveBlending});
+function shadow(x,z,w,d){const m=new THREE.Mesh(new THREE.PlaneGeometry(w+.5,d+.5),shM);m.rotation.x=-Math.PI/2;m.position.set(x,(curLv?-2.8:0)+.04,z);scene.add(m)}
+const RM=[['Master bedroom',-4.4,-.4,-8.6,-3.6,0xd8c8b8,0,'carpet'],['Boy’s bedroom',3.7,7.6,-8.6,-3.6,0xa8c0e0,0,'carpet'],['Bathroom',1.7,4.3,-3.6,-.2,0xffffff,0,'tile'],
+ ['Kitchen',-1.7,4.3,-.2,4.4,0xe8e0d0,0,'tile'],['Garage',-7.6,-1.7,1.2,8.1,0xffffff,0,'conc'],['Living room',-1.7,4.3,4.4,8.8,0xffffff,0,'wood'],
+ ['Basement hallway',-8,1,.8,3,0xffffff,1,'conc'],['Right storage',-8,-4.4,3,7.2,0xffffff,1,'conc'],['Left storage',-4.4,-.8,3,7.2,0xffffff,1,'conc'],
+ ['Hallway',-.4,3.7,-6,-3.6,0xffffff,0,'wood'],['Hallway',-.4,1.7,-3.6,-.2,0xffffff,0,'wood'],['Stairs',-5,-.4,-2.8,-.8,0xffffff,0,'wood'],['Stairs',-5,-.4,-2.8,-.8,0xffffff,1,'conc'],
+ ['Basement landing',-6.8,-5,-2.8,.8,0xffffff,1,'conc'],['Basement closet',-.8,1,3,5.8,0xffffff,1,'conc']];
+RM.forEach(r=>{r[1]*=S;r[2]*=S;r[3]*=S;r[4]*=S});
+const roomAt=(x,z,l=lvl)=>RM.findIndex(r=>r[6]===l&&x>r[1]&&x<r[2]&&z>r[3]&&z<r[4]);
+const L=(x,z,w,d,h,c,y=0)=>box(x*SC,z*SC,w*SC,d*SC,h,0,false,y,glow(c));
+const rug=(x,z,w,d,c)=>B(x,z,w,d,.02,c,.03,false);
+// yard: grass slabs with a hole for the basement stairs
+function slab(x0,x1,z0,z1){const w=x1-x0,d=z1-z0,c=M(0x55585c);box((x0+x1)/2,(z0+z1)/2,w,d,.2,0,false,-.2,[c,c,tm('grass',w/3,d/3),c,c,c])}
+slab(-80,80,-80,SZ0);slab(-80,80,SZ1,80);slab(-80,SX0,SZ0,SZ1);slab(SX1,80,SZ0,SZ1);
+B(FDX,(FDZ+OZ-2.2)/2+.3,2,OZ-2.2-FDZ,.04,0x7a7064,0,false);B((FDX+OX)/2,OZ-2.4,OX-FDX,1.6,.04,0x7a7064,0,false);B(FDX,FDZ+.7,3,1.4,.06,0x8a8478,0,false);B(-4.6*S,15.5,4.3,9.2,.04,0x4e5156,0,false);
+const cone=new THREE.ConeGeometry(1.4,4,5),trunk=new THREE.CylinderGeometry(.2,.3,1.4,5),NT=64,fol=new THREE.InstancedMesh(cone,M(0x1b3a2a),NT),trk=new THREE.InstancedMesh(trunk,M(0x3b2a1e),NT),mx=new THREE.Matrix4();
+for(let n=0;n<NT;){const x=R(-58,58),z=R(-50,62);if(x>-33&&x<38&&z>-29&&z<38)continue;const s=R(.8,1.6);mx.makeScale(s,s,s);mx.setPosition(x,2.4*s,z);fol.setMatrixAt(n,mx);mx.setPosition(x,.7*s,z);trk.setMatrixAt(n,mx);n++}
+scene.add(fol,trk);
+{const x0=-32.6,x1=38.6,z0=-28.6,z1=40.6,pc=0x6a5a48;for(let x=x0;x<=x1;x+=2.6){B(x,z0,.14,.14,1.3,pc,0,false);B(x,z1,.14,.14,1.3,pc,0,false)}for(let z=z0;z<=z1;z+=2.6){B(x0,z,.14,.14,1.3,pc,0,false);B(x1,z,.14,.14,1.3,pc,0,false)}
+ for(const y of[.5,1])for(const[cx,cz,w,d]of[[(x0+x1)/2,z0,x1-x0,.05],[(x0+x1)/2,z1,x1-x0,.05],[x0,(z0+z1)/2,.05,z1-z0],[x1,(z0+z1)/2,.05,z1-z0]])B(cx,cz,w,d,.08,0x7a6a58,y,false)}
+{const bi=new THREE.InstancedMesh(new THREE.IcosahedronGeometry(.7,0),M(0x244d2c),40),m4=new THREE.Matrix4();let n=0;while(n<40){const e=Math.random()*4|0,u=Math.random();let x,z;if(e<2){x=-7.6*S+u*15.2*S;z=e?9.6*S:-9.6*S}else{z=-8.6*S+u*17.4*S;x=e===2?-8.6*S:8.6*S}
+ if(e===1&&(Math.abs(x-FDX)<2.4||Math.abs(x+4.6*S)<2.6))continue;const k=R(.6,1.2);m4.makeScale(k,k*.8,k);m4.setPosition(x,.45*k,z);bi.setMatrixAt(n++,m4)}scene.add(bi)}
+const sp=[];for(let i=0;i<220;i++){const a=R(0,6.28),e=R(.2,1.4);sp.push(Math.cos(a)*Math.cos(e)*90,Math.sin(e)*90,Math.sin(a)*Math.cos(e)*90)}
+const sg=new THREE.BufferGeometry();sg.setAttribute('position',new THREE.Float32BufferAttribute(sp,3));scene.add(new THREE.Points(sg,new THREE.PointsMaterial({size:1.6,sizeAttenuation:false,fog:false,color:0xffffff})));
+const moon=new THREE.Mesh(new THREE.SphereGeometry(4,8,6),new THREE.MeshBasicMaterial({color:0xe8ecff,fog:false}));moon.position.set(-40,45,-60);scene.add(moon);
+{const g=new THREE.SphereGeometry(100,16,10),p=g.attributes.position,c=[];for(let i=0;i<p.count;i++){const k=1-cl(p.getY(i)/100,0,1);c.push(.02+.05*k,.04+.08*k,.09+.16*k)}
+ g.setAttribute('color',new THREE.Float32BufferAttribute(c,3));const d=new THREE.Mesh(g,new THREE.MeshBasicMaterial({vertexColors:true,side:THREE.BackSide,fog:false,depthWrite:false}));d.userData.dyn=1;d.renderOrder=-2;scene.add(d);
+ const sp=new THREE.Sprite(new THREE.SpriteMaterial({map:rad([[0,'rgba(255,255,255,.9)'],[.3,'rgba(160,185,255,.35)'],[1,'rgba(160,185,255,0)']]),blending:THREE.AdditiveBlending,fog:false,depthWrite:false}));sp.position.copy(moon.position);sp.scale.set(46,46,1);scene.add(sp)}
+// equipment truck (south yard)
+B(OX,OZ,4.2,2.4,2.2,0xe6e8ee,.5);B(OX+3,OZ,1.8,2.4,1.5,0x3a6ea8,.5);L(OX+3.95,OZ,.05,1.8,.7,0x7fb0ff,1.2);L(OX-1,OZ+1.22,1.6,.04,.5,0xe8a030,1.3);
+for(const dx of[-1.4,1.4,3.2])for(const dz of[-1.3,1.3])B(OX+dx,OZ+dz,.9,.3,.9,0x111111,0,false);
+B(OX,OZ-2.2,3.6,.8,.9,0x6a5a48);L(OX,OZ-2.2,1.2,.5,.08,0x6fe0a0,.9);
+// walls (ex: -1/1 marks which side is exterior so it gets siding)
+function mkDoor(x,z,v){const p=new THREE.Group();p.position.set(v?x:x-.9,curLv?-2.8:0,v?z-.9:z);const s=new THREE.Mesh(G(v?.12:1.8,2.4,v?1.8:.12),M(0x80562f));s.position.set(v?0:.9,1.2,v?.9:0);s.castShadow=s.receiveShadow=Q>=2;p.add(s);const kn=new THREE.Mesh(v?G(.3,.08,.08):G(.08,.08,.3),M(0xc8a050));kn.position.set(v?0:1.55,1,v?1.55:0);p.add(kn);scene.add(p);
+  {const c=0xe2d8c4,t=WT+.06;if(v){box(x,z-.94,t,.08,2.45,c,false);box(x,z+.94,t,.08,2.45,c,false);box(x,z,t,2,.08,c,false,2.4)}else{box(x-.94,z,.08,t,2.45,c,false);box(x+.94,z,.08,t,2.45,c,false);box(x,z,2,t,.08,c,false,2.4)}}
+  const col={x0:v?x-.06:x-.9,x1:v?x+.06:x+.9,z0:v?z-.9:z-.06,z1:v?z+.9:z+.06,lv:curLv,door:1};colliders.push(col);const d={p,col,open:0,a:0,v,x,z,lv:curLv};doors.push(d);
+  d.tg=()=>{d.open^=1;if(x===FDX&&z===FDZ)wake();const i=colliders.indexOf(col);if(d.open&&i>=0)colliders.splice(i,1);else if(!d.open&&i<0)colliders.push(col);tone(d.open?110:70,.3,'sawtooth',.08,-30)};
+  add(x,z,()=>d.open?'Close door':'Open door',d.tg)}
+function wm(ex,v,tn=0xffffff){const b=curLv?bwM:tn===0xffffff?wlM:tm('wall',1,1,tn);if(!ex)return b;const a=Array(6).fill(b);a[v?(ex<0?1:0):(ex<0?5:4)]=sdM;return a}
+function wall(v,k,a,b,g=[],ex=0){k*=S;a*=S;b*=S;g=g.map(e=>Array.isArray(e)?[e[0]*S,e[1]*S]:e*S);
+  const h=curLv===1?2.6:3,tn=(p,q)=>{if(curLv)return 0xffffff;const mid=(p+q)/2;for(const o of[-.7,.7]){const r=v?roomAt(k+o,mid,0):roomAt(mid,k+o,0);if(r>=0)return RM[r][5]}return 0xffffff},
+  pl=(p,q)=>{const m=wm(ex,v,tn(p,q));return v?box(k,(p+q)/2,WT,q-p,h,0,true,0,m,1):box((p+q)/2,k,q-p,WT,h,0,true,0,m,1)};let c=a;
+  for(const e of g){const[x,hh]=Array.isArray(e)?e:[e,.9];if(x-hh>c)pl(c,x-hh);c=x+hh;const m=wm(ex,v,tn(x-hh,x+hh));v?box(k,x,WT,2*hh,h-2.4,0,false,2.4,m,1):box(x,k,2*hh,WT,h-2.4,0,false,2.4,m,1);if(!Array.isArray(e))mkDoor(v?k:x,v?x:k,v)}
+  if(b>c)pl(c,b)}
+const hw=(z,a,b,g,ex)=>wall(0,z,a,b,g,ex),vw=(x,a,b,g,ex)=>wall(1,x,a,b,g,ex);
+RM.forEach((r,i)=>{if(i===11||i===12)return;curLv=r[6];const w=r[2]-r[1],d=r[4]-r[3],m=new THREE.Mesh(new THREE.PlaneGeometry(w,d),tm(r[7],w/2,d/2,r[5]));m.rotation.x=-Math.PI/2;m.position.set((r[1]+r[2])/2,(curLv?-2.8:0)+.02,(r[3]+r[4])/2);scene.add(m);const o=m.clone();o.material=aoM;o.position.y+=.025;scene.add(o)});curLv=0;
+// ground floor shell
+hw(-8.6,-4.4,-.4,[],-1);hw(-3.6,-4.4,-.4,[],1);vw(-4.4,-8.6,-3.6,[],-1);vw(-.4,-8.6,-6,[],1);vw(-.4,-6,-2.8,[-4.8]);vw(-.4,-.8,-.2);          // master + hall west
+hw(-8.6,3.7,7.6,[],-1);vw(7.6,-8.6,-3.6,[],1);vw(3.7,-8.6,-6,[],-1);vw(3.7,-6,-3.6,[-4.8]);hw(-6,-.4,3.7,[],-1);hw(-3.6,4.3,7.6,[],1);       // boy's + hall north
+hw(-3.6,1.7,4.3);vw(1.7,-3.6,-.2,[-1.8]);hw(-.2,-1.7,4.3,[[.65,1.05]]);vw(4.3,-3.6,8.8,[],1);                                                // bathroom, kitchen, east wall
+vw(-1.7,-.2,8.8,[3]);hw(4.4,-1.7,4.3,[[1.3,1.3]]);hw(8.8,-1.7,4.3,[.6],1);                                                                    // kitchen/living
+vw(-7.6,1.2,8.1,[],-1);hw(1.2,-7.6,-1.7,[],-1);hw(8.1,-7.6,-1.7,[-4.6],1);                                                                    // garage
+// basement (level 1) + stair rails (level 2 = both floors)
+curLv=1;hw(.8,-8,1,[[-5.9,.9]]);hw(3,-8,1,[-6.2,-2.6,.1]);hw(7.2,-8,-.8);vw(-8,.8,7.2);vw(1,.8,5.8);hw(5.8,-.8,1);vw(-.8,3,7.2);vw(-4.4,3,7.2);vw(-6.8,-2.8,.8);hw(-2.8,-6.8,-5);vw(-5,-.8,.8);
+curLv=2;box((SX0+SX1)/2,SZ0,SX1-SX0,WT,5.8,0,true,0,wlM,1);box((SX0+SX1)/2,SZ1,SX1-SX0,WT,5.8,0,true,0,wlM,1);
+for(let i=0;i<14;i++)box(SX1+(i+.5)*(SX0-SX1)/14,(SZ0+SZ1)/2,(SX1-SX0)/14+.02,(SZ1-SZ0)*.85,2.8*(1-(i+.5)/14),0x6a5030,false);
+curLv=0;
+// roofs + ceilings
+const rfM=M(0x2b2a33),ceM=M(0xcfc8b8);
+RM.forEach((r,i)=>{if(r[6]||i===11)return;box((r[1]+r[2])/2,(r[3]+r[4])/2,r[2]-r[1]+.5,r[4]-r[3]+.5,.3,0,false,3,[rfM,rfM,rfM,ceM,rfM,rfM])});
+B(-3,-7,.8,.8,1.6,0x6a3a30,3.3,false);
+SC=S;
+// windows
+function win(x,z,v){B(x,z,v?.4:1.4,v?1.4:.4,1.3,0xe8e8ec,.9,false);L(x,z,v?.5:1.1,v?1.1:.5,1.1,0x35507a,1);
+  const X=x*SC,Z=z*SC,g=v?(X>0?-1:1):(Z>0?-1:1),m=new THREE.Mesh(new THREE.PlaneGeometry(v?3:2.2,v?2.2:3),moonM);m.rotation.x=-Math.PI/2;m.position.set(v?X+g*1.6:X,.07,v?Z:Z+g*1.6);scene.add(m)}
+[[-2.4,-8.6,0],[5.6,-8.6,0],[-4.4,-6.2,1],[7.6,-6.2,1],[4.3,-2,1],[4.3,1.8,1],[4.3,6.6,1],[3.2,8.8,0],[-7.6,5,1]].forEach(a=>win(...a));
+// ---- furniture ----
+B(-2.4,-7.6,1.9,2.4,.45,0x4a3020);B(-2.4,-7.5,1.8,2.3,.2,0xe0d8c8,.45);B(-2.9,-8.2,.6,.4,.12,0xf6f2ea,.65);B(-1.9,-8.2,.6,.4,.12,0xf6f2ea,.65);B(-2.4,-6.9,1.8,1.2,.06,0x7a3a48,.62,false);
+B(-3.7,-8.3,.5,.5,.55,0x4a3020);B(-1.1,-8.3,.5,.5,.55,0x4a3020);L(-3.7,-8.3,.2,.2,.25,0xb89f6a,.55);L(-1.1,-8.3,.2,.2,.25,0xb89f6a,.55);
+B(-3.7,-4.2,1.3,.7,2.2,0x4a3020);B(-4.05,-6,.5,1.5,.9,0x5a4030);L(-4.28,-6,.04,1,.8,0x9ab4c8,1.2);rug(-2.4,-6.2,2.8,2.2,0x6a2a38);          // master
+B(6.6,-7.7,1.2,2.2,.45,0x203a60);B(6.6,-7.6,1.1,2.1,.2,0xd8d8e0,.45);B(6.6,-8.3,.5,.4,.1,0xf0f0f0,.65);B(6.6,-6.9,1.1,1,.06,0x2a6a3a,.62,false);
+B(4.5,-8.2,1.5,.6,.78,0x7a5a35);B(4.5,-7.4,.45,.45,.5,0x3a3a42);L(4.5,-8.25,.6,.05,.4,0x6a9acc,.9);B(4.3,-4.4,.9,.55,.5,0xb08040);B(7,-4.2,1.2,.7,2.2,0x4a3020);B(7.4,-6,.3,1.4,1.5,0x5a4030);rug(5.4,-6.2,2.4,2.4,0x2a6a4a);
+B(5,-5.5,.3,.3,.3,0xd04040,.03,false);B(5.4,-5.2,.3,.3,.3,0x4060d0,.03,false);                                                                 // boy's
+B(3.85,-1.9,.8,1.7,.55,0xe8eef0);B(3.85,-1.9,.6,1.5,.02,0x3a6a8a,.55,false);B(2.2,-.7,.5,.7,.42,0xf4f4f4);B(2.2,-.4,.5,.2,.5,0xf4f4f4,.42);B(2.15,-3.2,.55,.9,.85,0x8a6a4a);L(1.88,-3.2,.04,.8,.8,0xa8c8d8,1.25);   // bathroom
+B(4,1.9,.65,3.8,.9,0x6a4a35);B(4,1.9,.72,3.9,.06,0x2a2a2e,.9,false);B(4,3.6,.7,.8,.92,0xb0b4b8);B(4,3.6,.5,.5,.03,0x151515,.93,false);B(4.1,1.4,.35,2.2,.7,0x7a5a40,1.5,false);
+B(-1.3,3.9,.8,.8,2,0xe0e4e8);B(.8,2,1.7,1,.9,0x8a6a45);for(const[x,z]of[[.2,.9],[1.4,.9],[.2,3.1],[1.4,3.1]])B(x,z,.35,.35,.5,0x3a2a1c,0,false);                    // kitchen
+B(1.7,6,.9,2.2,.45,0x4a6a58);B(1.3,6,.3,2.2,.9,0x3e5a4a);B(1.7,4.9,.9,.25,.65,0x3e5a4a);B(1.7,7.1,.9,.25,.65,0x3e5a4a);B(2.9,6,.8,1.3,.4,0x5a4030);
+B(4,6,.5,1.8,.5,0x3a2a1c);B(4.05,6,.12,1.4,.8,0x0e0e12,.5,false);B(3.3,4.9,.9,.9,.7,0x7a4a3a);B(-1.4,7.6,.4,1.6,1.9,0x4a3020);B(-1.2,3.5,.3,.3,1.7,0x3a2a1c,0,false);rug(2.2,6,3.2,3.2,0x6a3a3a);   // living
+rug(.65,-2,.9,2.8,0x6a2a2a);rug(1.65,-4.8,2.6,.9,0x6a2a2a);B(3.4,-5.7,.8,.4,.9,0x4a3020);L(2,-5.82,.5,.04,.4,0x6a5a40,1.4);L(.4,-3.7,.04,.5,.4,0x6a5a40,1.4);  // hall
+B(-4.6,5.2,2,4.3,.55,0x8a2a2a,.35);B(-4.6,5,1.8,2.2,.55,0x7a2020,.9);L(-4.6,5,1.82,2,.4,0x2a3a4a,.95);L(-5.3,7.4,.3,.05,.2,0xaaa070,.6);L(-3.9,7.4,.3,.05,.2,0xaaa070,.6);
+for(const x of[-5.65,-3.55])for(const z of[3.9,6.5])B(x,z,.25,.7,.7,0x111111,0,false);
+B(-7.15,3,.7,2.2,.9,0x6a5030);B(-7.1,2.5,.2,.4,.1,0xc03030,.9,false);B(-7.3,6.6,.5,2.2,1.9,0x555a60);B(-6.8,7.7,.8,.8,.8,0xa07840);B(-6.3,7.6,.6,.6,.6,0xb08850);B(-6.5,1.8,.7,.7,.9,0xe6e6e6);B(-5.7,1.8,.7,.7,.9,0xe6e6e6);  // garage
+curLv=1;
+B(-7.7,5,.5,3.2,1.9,0x4a4a50);B(-5.2,6.4,.8,.8,.7,0x9a7a48);B(-5,3.9,.6,.6,.5,0xa08040);B(-5.4,5.6,.9,.9,1.8,0x5a6670);B(-1.5,6.3,1,1,1.7,0x4a4a52);L(-1.5,5.77,.4,.05,.3,0xff6a20,.6);
+B(-3.5,6.6,1.2,.9,.8,0x8a6a40);B(-3,3.6,.6,.6,.6,0xa08848);B(.2,5.2,1.2,.7,1.9,0x4a3020);B(-3.5,1.9,8.5,.1,.1,0x8a8e92,2.2,false);B(-1.5,2.2,5,.1,.1,0x8a8e92,2.1,false);L(-5.9,1.9,.2,.2,.2,0xb8a068,2.3);L(-1.4,1.9,.2,.2,.2,0xb8a068,2.3);
+curLv=0;
+SC=1;const hideSpots=[{x:-3.7,z:-4.2,ex:-3.7,ez:-5.2,lv:0},{x:7,z:-4.2,ex:7,ez:-5.2,lv:0},{x:.2,z:5.2,ex:.2,ez:4,lv:1}].map(h=>({x:h.x*S,z:h.z*S,ex:h.ex*S,ez:h.ez*S,lv:h.lv}));
+const props=[];for(let i=0;i<8;i++){const r=RM[i%6],m=B(r[1]+(r[2]-r[1])*R(.25,.75),r[3]+(r[4]-r[3])*R(.25,.75),.35,.35,.3,0xb08040,0,false).m;m.userData.dyn=1;props.push({m,vx:0,vy:0,vz:0})}
+// bake static meshes into one draw call per material (big win on weak GPUs)
+(function(){const grp=new Map(),rm=[];for(const o of scene.children){if(!o.isMesh||o.isInstancedMesh||o.userData.dyn||Array.isArray(o.material))continue;o.updateMatrix();const g=o.geometry.clone();g.applyMatrix4(o.matrix);if(!grp.has(o.material))grp.set(o.material,[]);grp.get(o.material).push(g);rm.push(o)}
+  rm.forEach(o=>scene.remove(o));grp.forEach((a,m)=>{const o=new THREE.Mesh(mergeGeometries(a),m);if(Q>=2&&!m.transparent&&!m.isMeshBasicMaterial)o.castShadow=o.receiveShadow=true;scene.add(o)})})();
+const DN=140,dp=new Float32Array(DN*3);for(let i=0;i<DN*3;i++)dp[i]=R(-4,4);
+const dust=new THREE.Points(new THREE.BufferGeometry().setAttribute('position',new THREE.BufferAttribute(dp,3)),new THREE.PointsMaterial({size:2,sizeAttenuation:false,color:0xaab4cc,transparent:true,opacity:.35,depthWrite:false}));dust.frustumCulled=false;scene.add(dust);
+// props.glb: detailed chair / plant / lamp / candles / picture, instanced (x,z,rotY,level,y) in plan coordinates
+const PL={Chair:[[-2.4,2.7,0,0],[-6.3,3,-1.57,0],[-3.4,-6,-1.57,0]],Plant:[[4,8.3,0,0],[3.3,-4.2,0,0],[-1.1,.6,0,0]],Lamp:[[-1,5.3,0,0],[-.8,-6.8,0,0]],Candles:[[.8,2,0,0,.9],[2.9,6,0,0,.4],[-3.5,6.6,0,1,.8],[-3.7,-8.3,0,0,.55]],Picture:[[-2.4,-8.4,0,0,1.6],[5.6,-8.4,0,0,1.6],[2.6,8.6,Math.PI,0,1.6],[-4.1,6.8,Math.PI/2,0,1.6]]};
+try{new GLTFLoader().load('assets/props.glb',gl=>{gl.scene.traverse(o=>{const l=PL[o.name];if(!o.isMesh||!l)return;const im=new THREE.InstancedMesh(o.geometry,mk({vertexColors:true},.8),l.length),m4=new THREE.Matrix4(),q=new THREE.Quaternion();
+  l.forEach((p,i)=>{m4.compose(new THREE.Vector3(p[0]*S,(p[3]?-2.8:0)+(p[4]||0),p[1]*S),q.setFromEuler(new THREE.Euler(0,p[2],0)),new THREE.Vector3(1,1,1));im.setMatrixAt(i,m4);if(o.name==='Lamp')box(p[0]*S,p[1]*S,.26,.26,.3,0,false,1.2,glow(0xffe0a8))});im.castShadow=im.receiveShadow=Q>=2;scene.add(im)})},undefined,()=>{})}catch(e){}
+
+/* ---------- ghost definitions (evidence sets follow the Phasmophobia wiki) ---------- */
+const EV=['EMF Level 5','Spirit Box','Freezing Temperatures','Fingerprints (UV)','Ghost Writing'];
+const GT=[
+ {n:'Spirit',e:[0,1,4],hs:2.3,th:50,d:'no special strength'},
+ {n:'Demon',e:[2,3,4],hs:2.6,th:70,rare:1,d:'hunts early, sometimes at any sanity'},
+ {n:'Poltergeist',e:[1,3,4],hs:2.4,th:50,pg:1,d:'throws many objects at once'},
+ {n:'Shade',e:[0,2,4],hs:2.3,th:35,shy:1,d:'shy, will not hunt if you are close'},
+ {n:'Myling',e:[0,3,4],hs:2.5,th:50,quiet:1,d:'quiet footsteps during a hunt'},
+ {n:'Moroi',e:[1,2,4],hs:2.2,th:50,moroi:1,d:'speeds up as sanity falls, curses you'},
+ {n:'Jinn',e:[0,2,3],hs:2.4,th:50,jinn:1,d:'faster when you are far, drains sanity up close'},
+ {n:'Gallu',e:[0,1,3],hs:2.5,th:50,d:'aggressive'},
+ {n:'The Twins',e:[0,1,2],hs:2.4,th:50,tw:1,d:'one slow twin, one fast twin'}];
+const GI=Math.floor(R(0,GT.length)),T=GT[GI],GR=Math.floor(R(0,9)),HR=RM[GR],has=i=>T.e.includes(i);
+const NAME=pick(Math.random()<.5?['James','Daniel','Walter','Kevin','Harold','Peter']:['Mary','Ellen','Ruth','Karen','Lucy','Sarah'])+' '+pick(['Bellfield','Halstead','Marsh','Winter','Rook','Lancaster']),AGE=Math.floor(R(10,90)),DEAD=Math.floor(R(50,1000));let curse=0;
+const ghost=new THREE.Group(),gMat=new THREE.MeshBasicMaterial({color:0xa8c8ff,transparent:true,opacity:0,depthWrite:false});
+const gb=new THREE.Mesh(new THREE.ConeGeometry(.5,1.7,6),gMat);gb.position.y=.85;const gh2=new THREE.Mesh(new THREE.IcosahedronGeometry(.3,0),gMat);gh2.position.y=1.9;
+const e1=new THREE.Mesh(G(.1,.14,.05),M(0)),e2=e1.clone();e1.position.set(-.1,1.95,.27);e2.position.set(.1,1.95,.27);ghost.add(gb,gh2,e1,e2);
+const rc=i=>[(RM[i][1]+RM[i][2])/2+R(-.3,.3)*(RM[i][2]-RM[i][1]),(RM[i][3]+RM[i][4])/2+R(-.3,.3)*(RM[i][4]-RM[i][3]),RM[i][6]];
+ghost.position.set(...(a=>[a[0],0,a[1]])(rc(GR)));ghost.visible=false;scene.add(ghost);
+const gMats=[gMat],gParts={};   // ghost.glb (high-detail model) replaces the fallback cone when it loads
+try{new GLTFLoader().load('assets/ghost.glb',gl=>{gMats.length=0;gl.scene.traverse(o=>{if(o.name)gParts[o.name]=o;if(!o.isMesh)return;const s=o.material;
+  if(!s.isMeshBasicMaterial)o.material=new THREE.MeshLambertMaterial({color:s.color,vertexColors:!!o.geometry.attributes.color,side:THREE.DoubleSide,emissive:0x2c4670});
+  o.material.transparent=true;o.material.depthWrite=false;gMats.push(o.material)});ghost.remove(gb,gh2,e1,e2);ghost.add(gl.scene)},undefined,()=>{})}catch(e){}
+const gh={s:'idle',t:3,ev:0,vis:0,cd:45,fs:0,awake:0,hs:T.hs,lv:RM[GR][6],path:[],last:null,rp:0,grace:0,srch:0,sawHide:0};
+
+/* ---------- state ---------- */
+let sanity=100,light=true,hidden=null,playing=false,ended=false,ui=false,gear=0,pills=2,held=-1,hbT=0,stepT=0,t=0,bob=0,msgT=0,flick=1,fT=0,gdist=99,lastObj='',target=null,spirT=0,roomT=0,roomOK=0;
+let yaw=0,pitch=0,px=OX-3,pz=OZ-4,fy=0,lvl=0;const K={},J={e:[0,0,0,0,0],g:-1},bk={on:0,done:0,t:0,m:null};
+const TOOLS=['EMF Reader','Thermometer','Spirit Box','Writing Book'],TC=[0x4a4a50,0xb0b0b8,0x1a1a1a,0x6a4a2a,0x7a40d0];
+
+add(OX-1.2,OZ-2.2,()=>!gear&&'Take equipment',()=>{gear=1;msg('Equipment ready. 1–5 switch tools, F flashlight, J journal. Head into the house.',8000)});
+add(OX,OZ-2.2,()=>pills>0&&'Take sanity pills ('+pills+' left)',()=>{pills--;sanity=Math.min(100,sanity+35);msg('You feel steadier.')});
+add(OX+1.2,OZ-2.2,()=>'Finish investigation',()=>{if(J.g<0)return msg('Mark the ghost type in your journal first (J).');const ok=J.g===GI;end(ok,(ok?'Correct. ':'Wrong. ')+'It was a <b>'+T.n+'</b> ('+T.d+'): '+NAME+', died aged '+AGE+', '+DEAD+' years ago, haunting the '+HR[0]+'.<br>Evidence: '+T.e.map(i=>EV[i]).join(', ')+'.')});
+hideSpots.forEach(h=>add(h.x,h.z,()=>hidden===h?'Leave closet':(!hidden&&'Hide in closet'),()=>{if(hidden){px=h.ex;pz=h.ez;hidden=null}else{gh.sawHide=gh.s==='hunt'&&gdist<8&&los(ghost.position.x,ghost.position.z,px,pz,lvl)?1:0;hidden=h;px=h.x;pz=h.z}tone(60,.2,'square',.1)},{closet:1,lv:h.lv}));
+const bookIt=add(0,0,()=>bk.on&&(bk.done?'Read the book':'Pick up book'),()=>{if(bk.done)msg('Frantic scrawl fills the pages. That is ghost writing!',6000);else{bk.on=0;bk.m.visible=false}});
+bk.m=B(0,0,.3,.22,.04,0x6a4a2a,0,false).m;bk.m.visible=false;
+
+/* ---------- input / UI ---------- */
+addEventListener('keydown',e=>{
+  if(ui){if(e.code==='KeyJ'||e.code==='Escape')toggleJ(false);return}
+  K[e.code]=1;if(!playing)return;
+  if(e.code==='KeyJ')toggleJ(true);
+  if(e.code==='KeyF'&&gear){light=!light;tone(1200,.04,'square',.05)}
+  if(/^Digit[1-5]$/.test(e.code)&&gear){const n=+e.code[5]-1;held=held===n?-1:n;vm.visible=held>=0;if(held>=0)vm.material.color.setHex(TC[held])}
+  if(e.code==='KeyE'&&!e.repeat){if(target)target.act();else useTool()}
+});
+addEventListener('keyup',e=>K[e.code]=0);
+addEventListener('mousemove',e=>{if(!playing)return;yaw-=e.movementX*.0022;pitch=cl(pitch-e.movementY*.0022,-1.2,1.2)});
+$('go').onclick=()=>{audioInit();$('c').requestPointerLock()};
+document.addEventListener('pointerlockchange',()=>{if(document.pointerLockElement){playing=true;$('menu').hidden=true}else if(!ui&&!ended){playing=false;$('menu').hidden=false;$('go').textContent='Click to resume'}});
+function toggleJ(on){ui=on;$('jr').hidden=!on;if(on){jr();document.exitPointerLock()}else $('c').requestPointerLock()}
+function jr(){const ok=GT.map(g=>J.e.every((v,i)=>!v||g.e.includes(i)));
+  $('jr').innerHTML='<h2>Journal</h2><p>Tick the evidence you have witnessed</p>'+EV.map((n,i)=>`<button data-e=${i} class="${J.e[i]?'on':''}">${J.e[i]?'☑':'☐'} ${n}</button>`).join('')+'<p>What is the ghost?</p>'+GT.map((g,i)=>`<button data-g=${i} class="${J.g===i?'on':''}" style="opacity:${ok[i]?1:.35}">${g.n}<br><small>${g.e.map(x=>EV[x]).join(' · ')}</small></button>`).join('')+'<p><button data-x=1>Close (J)</button></p>'}
+$('jr').onclick=e=>{const b=e.target.closest('button');if(!b)return;const d=b.dataset;if(d.x)return toggleJ(false);if(d.e!=null)J.e[+d.e]^=1;if(d.g!=null)J.g=+d.g;jr()};
+function msg(s,ms=4500){$('msg').textContent=s;msgT=ms/1000}
+function end(win,text){ended=true;playing=false;document.exitPointerLock();$('menu').hidden=false;$('menu').innerHTML='<h1>'+(win?'CASE SOLVED':'INVESTIGATION OVER')+'</h1><p>'+text+'</p><button onclick="location.reload()">New house</button>'}
+const hit=(x,z)=>{for(const b of colliders)if((b.lv===lvl||b.lv===2)&&x+.35>b.x0&&x-.35<b.x1&&z+.35>b.z0&&z-.35<b.z1)return true;return false};
+
+/* ---------- audio (procedural) ---------- */
+let AC,master;
+function audioInit(){if(AC)return;AC=new AudioContext();master=AC.createGain();master.gain.value=.9;const comp=AC.createDynamicsCompressor(),cv=AC.createConvolver(),wet=AC.createGain(),len=AC.sampleRate*1.8|0,ib=AC.createBuffer(2,len,AC.sampleRate);
+  for(let c=0;c<2;c++){const d=ib.getChannelData(c);for(let i=0;i<len;i++)d[i]=(Math.random()*2-1)*Math.pow(1-i/len,2.5)}cv.buffer=ib;wet.gain.value=.22;master.connect(comp);master.connect(cv);cv.connect(wet);wet.connect(comp);comp.connect(AC.destination);
+  const o=AC.createOscillator(),g=AC.createGain();o.frequency.value=48;g.gain.value=.04;o.connect(g);g.connect(master);o.start()}
+function step(v=.2,pan=0,f=300){if(!AC)return;const n=AC.sampleRate*.12|0,b=AC.createBuffer(1,n,AC.sampleRate),d=b.getChannelData(0);for(let i=0;i<n;i++)d[i]=(Math.random()*2-1)*Math.pow(1-i/n,3);const s=AC.createBufferSource(),fl=AC.createBiquadFilter(),g=AC.createGain(),p=AC.createStereoPanner();s.buffer=b;fl.type='lowpass';fl.frequency.value=f;g.gain.value=v;p.pan.value=pan;s.connect(fl);fl.connect(g);g.connect(p);p.connect(master);s.start()}
+function tone(f,d,type='sine',v=.15,slide=0){if(!AC)return;const o=AC.createOscillator(),g=AC.createGain(),n=AC.currentTime;o.type=type;o.frequency.setValueAtTime(f,n);if(slide)o.frequency.exponentialRampToValueAtTime(Math.max(20,f+slide),n+d);g.gain.setValueAtTime(v,n);g.gain.exponentialRampToValueAtTime(.001,n+d);o.connect(g);g.connect(master);o.start();o.stop(n+d)}
+
+/* ---------- tools ---------- */
+function useTool(){
+  if(held===2&&spirT<=0){spirT=3;msg(gdist<6&&has(1)?pick(['“…get… out…”','“…behind… you…”','“…Mara…”','“…cold…”']):'…silence.');tone(800,.4,'sawtooth',.05,-300)}
+  if(held===3&&!bk.on){bk.on=1;bk.done=0;bk.t=0;bk.m.visible=true;bk.m.position.set(px-Math.sin(yaw),fy+.03,pz-Math.cos(yaw));bookIt.x=bk.m.position.x;bookIt.z=bk.m.position.z;msg('Book placed. Leave it where the ghost lingers.')}
+}
+const ri=()=>roomAt(px,pz);
+function emf(){let l=gdist<8?(gdist<5?3:2):1;if(gh.ev>0&&gdist<4.5)l=has(0)?5:(Math.random()<.5?4:3);return l}
+function temp(){const r=ri();return r<0?9+Math.sin(t*.3):r===GR?(has(2)?-3+Math.sin(t)*2:8+Math.sin(t*.4)*1.5):17+Math.sin(t*.2)}
+function objective(){const o=[[gear,'Take equipment from the truck'],[ri()>=0||roomOK||gear&&lastObj.includes('✓ Enter'),'Enter the house'],[roomOK,'Find the ghost’s room'],[J.e.reduce((a,b)=>a+b)>=3,'Record 3 pieces of evidence (J)'],[J.g>=0,'Identify the ghost, then finish at the truck']];
+  return o.map(a=>(a[0]?'<s>✓ ':'• ')+a[1]+(a[0]?'</s>':'')).join('<br>')}
+
+/* ---------- ghost behaviour: navmesh A*, opens doors, line of sight, hunt grace period ---------- */
+let sprint=false;
+const NC=.5,GX0=-11.5,GZ0=-13,GW=46,GHt=52,NAV=[new Uint8Array(GW*GHt),new Uint8Array(GW*GHt)],gcell=(x,z)=>[Math.floor((x-GX0)/NC),Math.floor((z-GZ0)/NC)],gpos=(i,j)=>[GX0+(i+.5)*NC,GZ0+(j+.5)*NC],inSt=(x,z)=>x>SX0&&x<SX1&&z>SZ0&&z<SZ1;
+for(let l=0;l<2;l++)for(let j=0;j<GHt;j++)for(let i=0;i<GW;i++){const[x,z]=gpos(i,j);let ok=RM.some(r=>r[6]===l&&x>r[1]-.2&&x<r[2]+.2&&z>r[3]-.2&&z<r[4]+.2);if(ok)for(const b of colliders){if(b.door||(b.lv!==l&&b.lv!==2))continue;if(x+.3>b.x0&&x-.3<b.x1&&z+.3>b.z0&&z-.3<b.z1){ok=0;break}}NAV[l][j*GW+i]=ok?1:0}
+const DX=[1,-1,0,0,1,1,-1,-1],DZ=[0,0,1,-1,1,-1,1,-1];
+function astar(l0,x0,z0,l1,x1,z1){
+  const N=GW*GHt,id=(l,i,j)=>l*N+j*GW+i,ok=(l,i,j)=>i>=0&&j>=0&&i<GW&&j<GHt&&NAV[l][j*GW+i],
+  snap=(l,x,z)=>{const[i,j]=gcell(x,z);for(let r=0;r<9;r++)for(let a=-r;a<=r;a++)for(let b=-r;b<=r;b++)if(Math.max(Math.abs(a),Math.abs(b))===r&&ok(l,i+a,j+b))return[i+a,j+b];return null},s=snap(l0,x0,z0),t=snap(l1,x1,z1);if(!s||!t)return[];
+  const g=new Float32Array(2*N).fill(1e9),from=new Int32Array(2*N).fill(-1),Hp=[],S=id(l0,s[0],s[1]),Tg=id(l1,t[0],t[1]);
+  const push=(n,f)=>{Hp.push([f,n]);let k=Hp.length-1;while(k>0){const p=(k-1)>>1;if(Hp[p][0]<=Hp[k][0])break;[Hp[p],Hp[k]]=[Hp[k],Hp[p]];k=p}},
+  pop=()=>{const r=Hp[0],e=Hp.pop();if(Hp.length){Hp[0]=e;let k=0;for(;;){const a=2*k+1,b=a+1;let m=k;if(a<Hp.length&&Hp[a][0]<Hp[m][0])m=a;if(b<Hp.length&&Hp[b][0]<Hp[m][0])m=b;if(m===k)break;[Hp[m],Hp[k]]=[Hp[k],Hp[m]];k=m}}return r[1]};
+  g[S]=0;push(S,0);let it=0;
+  while(Hp.length&&it++<12000){const c=pop();if(c===Tg)break;const l=c>=N?1:0,r=c%N,j=(r/GW)|0,i=r%GW;
+    for(let d=0;d<8;d++){const dx=DX[d],dz=DZ[d],ni=i+dx,nj=j+dz;if(!ok(l,ni,nj))continue;if(dx&&dz&&(!ok(l,i+dx,j)||!ok(l,i,j+dz)))continue;const n=id(l,ni,nj),w=g[c]+(dx&&dz?1.41:1);if(w<g[n]){g[n]=w;from[n]=c;push(n,w+Math.hypot(ni-t[0],nj-t[1]))}}
+    const[cx,cz]=gpos(i,j);if(inSt(cx,cz)){const n=id(1-l,i,j);if(g[c]<g[n]){g[n]=g[c];from[n]=c;push(n,g[c]+Math.hypot(i-t[0],j-t[1]))}}}
+  if(from[Tg]<0&&Tg!==S)return[];const out=[];for(let c=Tg;c>=0;c=from[c]){const l=c>=N?1:0,r=c%N;out.push([...gpos(r%GW,(r/GW)|0),l]);if(c===S)break}return out.reverse()}
+function los(ax,az,bx,bz,l){const dx=bx-ax,dz=bz-az;for(const b of colliders){if(b.lv!==l&&b.lv!==2)continue;let t0=0,t1=1;
+  for(const[a0,a1,d,o]of[[b.x0,b.x1,dx,ax],[b.z0,b.z1,dz,az]]){if(Math.abs(d)<1e-6){if(o<a0||o>a1){t1=-1;break}}else{let u=(a0-o)/d,v=(a1-o)/d;if(u>v)[u,v]=[v,u];t0=Math.max(t0,u);t1=Math.min(t1,v);if(t0>t1)break}}
+  if(t0<=t1&&t1>=0)return false}return true}
+function follow(dt,sp){const gp=ghost.position;if(!gh.path.length)return true;const w=gh.path[0],dx=w[0]-gp.x,dz=w[1]-gp.z,d=Math.hypot(dx,dz),st=sp*dt;if(d>.01)gh.face=Math.atan2(dx,dz);if(d<=st+.05){gp.x=w[0];gp.z=w[1];gh.lv=w[2];gh.path.shift();return!gh.path.length}gp.x+=dx/d*st;gp.z+=dz/d*st;return false}
+const goto_=q=>{const gp=ghost.position;gh.path=astar(gh.lv,gp.x,gp.z,q[2],q[0],q[1])},anyRoom=()=>rc(Math.floor(R(0,9)));
+const fp=[];
+function mark(x,z,l){if(!has(3))return;const m=new THREE.Mesh(G(.25,.3,.02),glow(0xb060ff));m.position.set(x+R(-.4,.4),1.1-(l?2.8:0),z+R(-.4,.4));scene.add(m);fp.push(m);if(fp.length>14)scene.remove(fp.shift())}
+function wake(){if(gh.awake)return;gh.awake=1;gh.cd=45;gh.t=3;msg('The door creaks. Something in the house has awakened.',5000);tone(70,1,'sawtooth',.2,-30)}
+function throwP(n){const gp=ghost.position;props.slice().sort((a,b)=>Math.hypot(a.m.position.x-gp.x,a.m.position.z-gp.z)-Math.hypot(b.m.position.x-gp.x,b.m.position.z-gp.z)).slice(0,n).forEach(c=>{c.vx=(px-c.m.position.x)*.8;c.vz=(pz-c.m.position.z)*.8;c.vy=4});tone(150,.3,'square',.2)}
+function startHunt(){gh.s='hunt';gh.t=R(25,40);gh.hs=T.tw?(Math.random()<.5?1.9:3.1):T.hs;gh.grace=3;gh.last=[px,pz,lvl];gh.path=[];gh.rp=0;gh.srch=0;msg('The lights die. It’s hunting you. Hide or run.',4000);tone(45,1.4,'sawtooth',.3,-20)}
+function stopHunt(){gh.s='idle';gh.t=R(2,6);gh.cd=R(25,40);gh.path=[];gh.last=null}
+function updGhost(dt){
+  const gp=ghost.position;gh.ev-=dt;gh.vis-=dt;
+  if(inSt(gp.x,gp.z))gh.lv=-2.8*cl((gp.x-SX1)/(SX0-SX1),0,1)<-1.4?1:0;
+  const same=gh.lv===lvl,d2=Math.hypot(px-gp.x,pz-gp.z);let mv=false;
+  if(gh.s==='hunt'){
+    if((gh.grace-=dt)<=0){
+      const seen=same&&!hidden&&d2<16&&los(gp.x,gp.z,px,pz,gh.lv),heard=same&&!hidden&&(d2<3.5||(sprint&&d2<10));
+      if(seen||heard)gh.last=[px,pz,lvl];
+      const hs=hidden&&gh.sawHide,tg=hs?[hidden.x,hidden.z,hidden.lv]:gh.last;
+      if(tg&&(gh.rp-=dt)<=0){gh.rp=.4;goto_(tg)}
+      const sp=gh.hs+(1-sanity/100)*.5+(T.moroi?1-sanity/100:0)+(T.jinn&&d2>6?.8:0)+(seen?.35:-.2);
+      mv=true;if(follow(dt,sp)&&!hs){if(!seen&&!heard)gh.last=null;if(!gh.last)goto_(anyRoom())}
+      if(hidden){const dh=Math.hypot(hidden.x-gp.x,hidden.z-gp.z);gh.srch=gh.lv===hidden.lv&&dh<1.7?gh.srch+dt*(gh.sawHide?2:1):Math.max(0,gh.srch-dt);if(gh.srch>2.2)end(false,'It found you hiding. A closet only helps if it did not see you go in.')}
+      if((gh.fs-=dt)<=0){gh.fs=.45;if(gdist<(T.quiet?9:20))step(Math.min(.9,3/Math.max(1,gdist)),cl(((gp.x-px)*Math.cos(yaw)-(gp.z-pz)*Math.sin(yaw))/Math.max(.5,d2),-1,1),250)}
+    }
+    if((gh.t-=dt)<=0)stopHunt();
+  }else if(gh.awake){
+    gh.t-=dt;gh.cd-=dt;
+    if(gh.s==='roam'){mv=true;if(follow(dt,1.3)||gh.t<=0){gh.s='idle';gh.t=R(2,6);gh.path=[]}}
+    else if(gh.t<=0){
+      const r=Math.random();gh.t=R(2,6);
+      if(gh.cd<=0&&(sanity<T.th||(T.rare&&r<.08))&&!(T.shy&&gdist<8))startHunt();
+      else if(r<.55){gh.s='roam';gh.t=25;goto_(r<.3?anyRoom():rc(GR))}
+      else if(r<.55+(T.shy?.1:.25)){const ds=doors.filter(d=>d.lv===gh.lv);if(ds.length){const d=ds.reduce((b,d)=>Math.hypot(d.x-gp.x,d.z-gp.z)<Math.hypot(b.x-gp.x,b.z-gp.z)?d:b);if(Math.hypot(d.x-gp.x,d.z-gp.z)<7){d.tg();mark(d.x,d.z,d.lv)}}gh.ev=3;if(Math.random()<.4)throwP(1)}
+      else{gh.ev=3;gh.vis=2.5;tone(220,.8,'sawtooth',.12,-120);if(T.pg)throwP(4);if(T.jinn&&gdist<6){sanity=Math.max(0,sanity-8);msg('A chill drains you…')}if(T.moroi&&gdist<10)curse=1;
+        if(same&&d2<9&&!hidden&&los(gp.x,gp.z,px,pz,lvl))sanity=Math.max(0,sanity-6)}
+    }
+  }
+  if(mv)for(const d of doors)if(!d.open&&d.lv===gh.lv&&Math.hypot(d.x-gp.x,d.z-gp.z)<1.4)d.tg();
+  const ry=inSt(gp.x,gp.z)?-2.8*cl((gp.x-SX1)/(SX0-SX1),0,1):gh.lv?-2.8:0;gp.y=ry+Math.sin(t*2)*.1;
+  if(mv&&gh.face!==undefined)ghost.rotation.y=gh.face;else ghost.rotation.y=Math.atan2(px-gp.x,pz-gp.z);
+  gdist=Math.hypot(px-gp.x,pz-gp.z,fy-ry);
+  if(!hidden&&gh.s==='hunt'&&gh.grace<=0&&gdist<.9)end(false,'It caught you. The '+T.n+' keeps another soul.<br>'+NAME+' is still in the '+HR[0]+'.');
+  const op=gh.s==='hunt'?(Math.random()<.6?.85:.1):gh.vis>0?.6:0;for(const m of gMats)m.opacity=op;ghost.visible=op>.03;
+  if(gParts.ArmL){const A=gh.s==='hunt'?-1.35:-.4+Math.sin(t*2)*.12;gParts.ArmL.rotation.x=A;gParts.ArmR.rotation.x=A+Math.sin(t*3)*.1;gParts.Hair.rotation.z=Math.sin(t*1.7)*.1;gParts.Head.rotation.z=Math.sin(t*.8)*.12}
+  for(const p of props)if(p.vx||p.vz||p.vy){p.m.position.x+=p.vx*dt;p.m.position.z+=p.vz*dt;p.m.position.y+=p.vy*dt;p.vy-=12*dt;if(p.m.position.y<.15){p.m.position.y=.15;p.vx*=.3;p.vz*=.3;p.vy=0;if(Math.abs(p.vx)<.1)p.vx=p.vz=0;if(Math.hypot(p.m.position.x-px,p.m.position.z-pz)<4)sanity=Math.max(0,sanity-4)}}
+}
+
+/* ---------- main update ---------- */
+function update(dt){
+  t+=dt;spirT-=dt;sprint=false;const fx=-Math.sin(yaw),fz=-Math.cos(yaw);let moving=false;
+  if(!hidden){
+    const mx=(K.KeyW?1:0)-(K.KeyS?1:0),mz=(K.KeyD?1:0)-(K.KeyA?1:0),vx=fx*mx+Math.cos(yaw)*mz,vz=fz*mx-Math.sin(yaw)*mz,l=Math.hypot(vx,vz);
+    if(l>0){moving=true;const run=K.ShiftLeft||K.ShiftRight,s=(sprint=!!run,run?4.6:3)*dt/l,nx=px+vx*s;if(!hit(nx,pz))px=nx;const nz=pz+vz*s;if(!hit(px,nz))pz=nz;stepT-=dt*(run?1.6:1);if(stepT<=0){stepT=.5;step(.3,0,450)}}
+    px=cl(px,-32,38);pz=cl(pz,-28,40)
+  }else{px=hidden.x;pz=hidden.z}
+  if(px>SX0&&px<SX1&&pz>SZ0&&pz<SZ1&&!hidden){fy=-2.8*cl((px-SX1)/(SX0-SX1),0,1);lvl=fy<-1.4?1:0}else fy=lvl?-2.8:0;
+  bob=moving?Math.sin(t*9)*.035:0;cam.position.set(px,fy+(hidden?1.4:1.6)+bob,pz);cam.rotation.set(pitch,yaw,0);vm.visible=held>=0&&!hidden;
+  for(const d of doors){d.a+=(d.open-d.a)*Math.min(1,dt*6);d.p.rotation.y=(d.v?1:-1)*1.5*d.a}
+  // interaction
+  target=null;let bd=9;
+  for(const it of inters){if(it.lv!==lvl||hidden&&!it.closet)continue;const l=it.label();if(!l)continue;const dx=it.x-px,dz=it.z-pz,d=Math.hypot(dx,dz);if(d<2.2&&d<bd&&(d<.8||(dx*fx+dz*fz)/d>.5)){target=it;bd=d;it.cur=l}}
+  $('pr').textContent=target?'[E] '+target.cur:'';
+  // tools & evidence
+  const r=ri();$('tool').textContent=held===0?'EMF '+'█'.repeat(emf())+'░'.repeat(5-emf()):held===1?temp().toFixed(1)+' °C':held===2?'Spirit Box · [E] ask':held===3?'Writing Book · [E] place':held===4?'UV Light · sweep doors':gear?'Press 1–5 for tools':'';
+  if(r===GR&&held>=0&&gear){roomT+=dt;if(roomT>4&&!roomOK){roomOK=1;msg('Something is wrong in this room. This must be the ghost’s favourite room.',6000)}}
+  if(bk.on&&!bk.done&&roomAt(bk.m.position.x,bk.m.position.z)===GR&&has(4)&&gdist<8&&(bk.t+=dt)>12){bk.done=1;bk.m.material=glow(0xffe08a)}
+  dust.position.set(px,fy+1.3,pz);for(let i=0;i<DN;i++){const j=i*3;dp[j]+=Math.sin(t*.7+i)*.15*dt;dp[j+1]+=Math.cos(t*.5+i*1.7)*.1*dt;dp[j+2]+=Math.sin(t*.6+i*2.3)*.15*dt;for(let k=0;k<3;k++){if(dp[j+k]>4)dp[j+k]-=8;if(dp[j+k]<-4)dp[j+k]+=8}}dust.geometry.attributes.position.needsUpdate=true;
+  for(const f of fp)f.visible=held===4;updGhost(dt);
+  // sanity
+  let d=r<0?-(Math.hypot(px-OX,pz-OZ+2.2)<6?1.5:.3):(light&&gear?.1:.45)+(r===GR?.25:0);if(gdist<5)d+=(5-gdist)*.35;if(hidden&&gh.s==='hunt')d+=2;if(curse&&r>=0)d+=.3;
+  sanity=cl(sanity-d*dt,0,100);
+  // look & feel
+  fT-=dt;if(fT<=0){fT=R(.05,.3);flick=((gdist<10&&(gh.s==='hunt'||gh.vis>0)||sanity<30)&&Math.random()<.4)?(Math.random()<.35?0:R(.1,.7)):1}
+  torch.intensity=light&&gear?14*(.5+sanity/200)*flick:0;
+  const dn=r<0?.04:.1+(1-sanity/100)*.08;scene.fog.density+=(dn-scene.fog.density)*Math.min(1,dt*3);amb.intensity+=((r<0?.8:lvl?.3:.5)-amb.intensity)*Math.min(1,dt*3);
+  $('vig').style.opacity=.3+(1-sanity/100)*.6;$('flash').style.opacity=gh.s==='hunt'?.12+.08*Math.sin(t*10):0;$('san').style.width=sanity+'%';
+  hbT-=dt;if(hbT<=0&&(sanity<55||gh.s==='hunt')){hbT=cl(.4+sanity/100,.45,1.1);tone(55,.14,'sine',.4);setTimeout(()=>tone(50,.14,'sine',.3),170)}
+  if(msgT>0){msgT-=dt;if(msgT<=0)$('msg').textContent=''}
+  const o=objective();if(o!==lastObj){lastObj=o;$('obj').innerHTML='<b>Objectives</b><br>'+o}
+}
+$('ql').innerHTML=['Low','Medium','High'].map((n,i)=>'<button data-q='+i+(i===Q?' class="on"':'')+'>'+n+'</button>').join('');$('ql').onclick=e=>{const q=e.target.dataset&&e.target.dataset.q;if(q!=null)location.search='?q='+q};
+if(Q>=1){const c=document.createElement('canvas');c.width=c.height=128;const g=c.getContext('2d'),im=g.createImageData(128,128);for(let i=0;i<im.data.length;i+=4){im.data[i]=im.data[i+1]=im.data[i+2]=Math.random()*255;im.data[i+3]=255}g.putImageData(im,0,0);$('grain').style.backgroundImage='url('+c.toDataURL()+')';$('grain').style.display='block'}
+try{if('serviceWorker' in navigator&&/^https?:/.test(location.protocol))navigator.serviceWorker.register('sw.js').catch(()=>{})}catch(e){}
+let last=performance.now(),fa=0,fn=0,warned=0;
+renderer.setAnimationLoop(now=>{const dt=Math.min((now-last)/1000,.1);last=now;if(playing&&!ui)update(dt);renderer.render(scene,cam);
+  fa+=dt;fn++;if(fa>3){if(fn/fa<30&&pr>.55){pr=Math.max(.55,pr-.15);renderer.setPixelRatio(pr);resize()}else if(fn/fa<26&&pr<=.56&&Q>0&&!warned){warned=1;msg('Low frame rate: choose Low quality in the menu (Esc).',7000)}fa=fn=0}});
+</script></body></html>
